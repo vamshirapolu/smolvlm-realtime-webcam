@@ -59,13 +59,64 @@
         label {
             font-weight: bold;
         }
-        select {
+        select, input {
             padding: 8px;
             border-radius: 4px;
             border: 1px solid #ccc;
         }
         .hidden {
             display: none;
+        }
+        .api-settings {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+        }
+        .api-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        /* Toggle switch styling */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
         }
     </style>
 </head>
@@ -77,9 +128,36 @@
     <canvas id="canvas" class="hidden"></canvas> <!-- For capturing frames -->
 
     <div class="io-areas">
-        <div>
-            <label for="baseURL">Base API:</label><br>
-            <input id="baseURL" name="Instruction" value="http://localhost:8080"></textarea>
+        <div class="api-settings">
+            <div class="api-row">
+                <label for="apiProvider">API Provider:</label>
+                <select id="apiProvider" name="apiProvider">
+                    <option value="ollama">Ollama</option>
+                    <option value="openai" selected>OpenAI</option>
+                </select>
+            </div>
+            
+            <div id="ollamaSettings" class="api-row hidden">
+                <label for="baseURL">Ollama Base URL:</label>
+                <input id="baseURL" value="http://localhost:11434" style="width: 250px;">
+                
+                <label for="ollamaModel">Model:</label>
+                <input id="ollamaModel" value="llava" style="width: 150px;">
+            </div>
+            
+            <div id="openaiSettings" class="api-row">
+                <label for="openaiModel">Model:</label>
+                <select id="openaiModel" style="width: 150px;">
+                    <option value="gpt-5-nano" selected>gpt-5-nano</option>
+                    <option value="gpt-5-mini">gpt-5-mini</option>
+                    <option value="gpt-5.1">gpt-5.1</option>
+                    <option value="gpt-4.1-nano">gpt-4.1-nano</option>
+                    <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                    <option value="gpt-4.1">gpt-4.1</option>
+                    <option value="gpt-4o-mini">gpt-4o-mini</option>
+                    <option value="gpt-4o">gpt-4o</option>
+                </select>
+            </div>
         </div>
         <div>
             <label for="instructionText">Instruction:</label><br>
@@ -96,10 +174,29 @@
         <select id="intervalSelect" name="Interval between 2 requests">
             <option value="100">100ms</option>
             <option value="250">250ms</option>
-            <option value="500" selected>500ms</option>
+            <option value="500">500ms</option>
             <option value="1000">1s</option>
             <option value="2000">2s</option>
+            <option value="5000">5s</option>
+            <option value="10000" selected>10s</option>
         </select>
+        
+        <div style="display: flex; align-items: center; margin-left: 10px;">
+            <label for="ttsEnabled" style="margin-right: 5px;">Text-to-Speech:</label>
+            <label class="switch">
+                <input type="checkbox" id="ttsEnabled" checked>
+                <span class="slider"></span>
+            </label>
+        </div>
+
+        <div style="display: flex; align-items: center; margin-left: 10px;">
+            <label for="releaseCamera" style="margin-right: 5px;">Release camera on Stop:</label>
+            <label class="switch">
+                <input type="checkbox" id="releaseCamera">
+                <span class="slider"></span>
+            </label>
+        </div>
+        
         <button id="startButton" class="start">Start</button>
     </div>
 
@@ -111,38 +208,194 @@
         const responseText = document.getElementById('responseText');
         const intervalSelect = document.getElementById('intervalSelect');
         const startButton = document.getElementById('startButton');
+        const apiProvider = document.getElementById('apiProvider');
+        const ollamaSettings = document.getElementById('ollamaSettings');
+        const openaiSettings = document.getElementById('openaiSettings');
+        const ollamaModel = document.getElementById('ollamaModel');
+        const openaiModel = document.getElementById('openaiModel');
+        const ttsEnabled = document.getElementById('ttsEnabled');
+        const releaseCamera = document.getElementById('releaseCamera');
+        const proxyBaseUrl = "http://localhost:8080";
+        const MAX_FRAME_WIDTH = 640;
 
         instructionText.value = "What do you see?"; // default instruction
 
         let stream;
         let intervalId;
         let isProcessing = false;
+        let isRequestInProgress = false;
+        let speechSynthesis = window.speechSynthesis;
+        let currentUtterance = null;
+        let currentAbortController = null;
+
+        function updateApiSettings() {
+            const isOllama = apiProvider.value === 'ollama';
+            ollamaSettings.classList.toggle('hidden', !isOllama);
+            openaiSettings.classList.toggle('hidden', isOllama);
+        }
+
+        // Toggle API settings based on selection
+        apiProvider.addEventListener('change', updateApiSettings);
+
+        // Switch provider based on which input is selected
+        baseURL.addEventListener('focus', () => {
+            if (apiProvider.value !== 'ollama') {
+                apiProvider.value = 'ollama';
+                updateApiSettings();
+            }
+        });
+        openaiModel.addEventListener('focus', () => {
+            if (apiProvider.value !== 'openai') {
+                apiProvider.value = 'openai';
+                updateApiSettings();
+            }
+        });
+        openaiModel.addEventListener('change', () => {
+            if (apiProvider.value !== 'openai') {
+                apiProvider.value = 'openai';
+                updateApiSettings();
+            }
+        });
+
+        // Initialize API settings visibility based on default selection
+        updateApiSettings();
+
+        // Function to speak text
+        function speakText(text) {
+            // Stop any current speech
+            stopSpeech();
+            
+            // Check if TTS is enabled
+            if (!ttsEnabled.checked) return;
+            
+            // Create a new utterance
+            currentUtterance = new SpeechSynthesisUtterance(text);
+            
+            // Optional: Configure voice properties
+            // currentUtterance.rate = 1.0; // Speed of speech
+            // currentUtterance.pitch = 1.0; // Pitch of voice
+            // currentUtterance.volume = 1.0; // Volume (0 to 1)
+            
+            // Speak the text
+            speechSynthesis.speak(currentUtterance);
+        }
+
+        // Function to stop speech
+        function stopSpeech() {
+            if (speechSynthesis.speaking) {
+                speechSynthesis.cancel();
+            }
+            currentUtterance = null;
+        }
 
         // Returns response text (string)
-        async function sendChatCompletionRequest(instruction, imageBase64URL) {
-            const response = await fetch(`${baseURL.value}/v1/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    max_tokens: 100,
-                    messages: [
-                        { role: 'user', content: [
-                            { type: 'text', text: instruction },
-                            { type: 'image_url', image_url: {
-                                url: imageBase64URL,
-                            } }
-                        ] },
+        async function sendChatCompletionRequest(instruction, imageBase64, signal) {
+            if (apiProvider.value === 'ollama') {
+                // Ollama API via proxy server
+                const requestBody = {
+                    "model": ollamaModel.value,
+                    "stream": false,
+                    "prompt": instruction || "What is in this picture?",
+                    "images": [imageBase64]
+                };
+                const ollamaBaseUrl = baseURL.value.trim();
+                if (ollamaBaseUrl) {
+                    requestBody.ollama_base_url = ollamaBaseUrl;
+                }
+
+                const response = await fetch(`${proxyBaseUrl}/api/generate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody),
+                    signal
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.text();
+                    console.error("Error sending data:", errorData);
+                    return `Server error: ${response.status} - ${errorData}`;
+                }
+                
+                try {
+                    // Get the response as text first
+                    const responseText = await response.text();
+                    console.log('Response text:', responseText);
+                    
+                    // Try to parse as JSON
+                    try {
+                        const data = JSON.parse(responseText);
+                        // Handle different response formats
+                        if (data.response) {
+                            return data.response;
+                        } else if (data.choices && data.choices[0] && data.choices[0].message) {
+                            return data.choices[0].message.content;
+                        } else if (data.error) {
+                            return `Error: ${data.error} - ${data.message || 'Unknown error'}`;
+                        } else {
+                            console.log("Unexpected response format:", data);
+                            return JSON.stringify(data);
+                        }
+                    } catch (jsonError) {
+                        console.error("JSON parse error:", jsonError);
+                        // If the response isn't valid JSON, return it as-is
+                        // It might be a plain text response
+                        return responseText;
+                    }
+                } catch (error) {
+                    console.error("Error processing response:", error);
+                    return `Error processing response: ${error.message}`;
+                }
+            } else {
+                // OpenAI API (via proxy for CORS)
+                const openaiPayload = {
+                    "model": openaiModel.value,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                { "type": "text", "text": instruction || "What is in this picture?" },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": `data:image/jpeg;base64,${imageBase64}`
+                                    }
+                                }
+                            ]
+                        }
                     ]
-                })
-            });
-            if (!response.ok) {
-                const errorData = await response.text();
-                return `Server error: ${response.status} - ${errorData}`;
+                };
+                const modelName = openaiModel.value;
+                if (modelName.startsWith("gpt-5") || modelName.startsWith("gpt-4.1")) {
+                    openaiPayload.max_completion_tokens = 300;
+                } else {
+                    openaiPayload.max_tokens = 300;
+                }
+
+                const response = await fetch(`${proxyBaseUrl}/api/openai`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(openaiPayload),
+                    signal
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.text();
+                    console.error("OpenAI API error:", errorData);
+                    return `OpenAI API error: ${response.status} - ${errorData}`;
+                }
+                
+                const data = await response.json();
+                if (data.choices && data.choices[0] && data.choices[0].message) {
+                    return data.choices[0].message.content;
+                } else {
+                    console.log("Unexpected OpenAI response format:", data);
+                    return JSON.stringify(data);
+                }
             }
-            const data = await response.json();
-            return data.choices[0].message.content;
         }
 
         // 1. Ask for camera permission on load
@@ -151,10 +404,12 @@
                 stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
                 video.srcObject = stream;
                 responseText.value = "Camera access granted. Ready to start.";
+                return true;
             } catch (err) {
                 console.error("Error accessing camera:", err);
                 responseText.value = `Error accessing camera: ${err.name} - ${err.message}. Please ensure permissions are granted and you are on HTTPS or localhost.`;
                 alert(`Error accessing camera: ${err.name}. Make sure you've granted permission and are on HTTPS or localhost.`);
+                return false;
             }
         }
 
@@ -163,45 +418,65 @@
                 console.warn("Video stream not ready for capture.");
                 return null;
             }
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
+            const scale = Math.min(1, MAX_FRAME_WIDTH / video.videoWidth);
+            const targetWidth = Math.round(video.videoWidth * scale);
+            const targetHeight = Math.round(video.videoHeight * scale);
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
             const context = canvas.getContext('2d');
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            return canvas.toDataURL('image/jpeg', 0.8); // Use JPEG for smaller size, 0.8 quality
+            const dataURL = canvas.toDataURL('image/jpeg', 0.8); // Use JPEG for smaller size, 0.8 quality
+            // Return just the base64 data without the data URL prefix
+            return dataURL.split(',')[1];
         }
 
         async function sendData() {
-            if (!isProcessing) return; // Ensure we don't have overlapping requests if processing takes longer than interval
+            if (!isProcessing || isRequestInProgress) return; // Ensure we don't have overlapping requests if processing takes longer than interval
+
+            isRequestInProgress = true;
+            const abortController = new AbortController();
+            currentAbortController = abortController;
 
             const instruction = instructionText.value;
-            const imageBase64URL = captureImage();
+            const imageBase64 = captureImage();
 
-            if (!imageBase64URL) {
+            if (!imageBase64) {
                 responseText.value = "Failed to capture image. Stream might not be active.";
                 // Optionally stop processing if image capture fails consistently
                 // handleStop();
+                isRequestInProgress = false;
+                currentAbortController = null;
                 return;
             }
 
-            const payload = {
-                instruction: instruction,
-                imageBase64URL: imageBase64URL
-            };
-
             try {
-                const response = await sendChatCompletionRequest(payload.instruction, payload.imageBase64URL);
+                const response = await sendChatCompletionRequest(instruction, imageBase64, abortController.signal);
+                if (!isProcessing) return;
                 responseText.value = response;
+                
+                // Speak the response text
+                speakText(response);
             } catch (error) {
+                if (error.name === 'AbortError') {
+                    return;
+                }
                 console.error('Error sending data:', error);
                 responseText.value = `Error: ${error.message}`;
+            } finally {
+                isRequestInProgress = false;
+                if (currentAbortController === abortController) {
+                    currentAbortController = null;
+                }
             }
         }
 
-        function handleStart() {
+        async function handleStart() {
             if (!stream) {
-                responseText.value = "Camera not available. Cannot start.";
-                alert("Camera not available. Please grant permission first.");
-                return;
+                const started = await initCamera();
+                if (!started || !stream) {
+                    responseText.value = "Camera not available. Cannot start.";
+                    return;
+                }
             }
             isProcessing = true;
             startButton.textContent = "Stop";
@@ -210,6 +485,12 @@
 
             instructionText.disabled = true;
             intervalSelect.disabled = true;
+            apiProvider.disabled = true;
+            baseURL.disabled = true;
+            ollamaModel.disabled = true;
+            openaiModel.disabled = true;
+            ttsEnabled.disabled = true;
+            releaseCamera.disabled = true;
 
             responseText.value = "Processing started...";
 
@@ -228,12 +509,35 @@
                 clearInterval(intervalId);
                 intervalId = null;
             }
+
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+                isRequestInProgress = false;
+            }
+            
+            // Stop any ongoing speech
+            stopSpeech();
+
+            if (releaseCamera.checked && stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+                video.srcObject = null;
+            }
+            
             startButton.textContent = "Start";
             startButton.classList.remove('stop');
             startButton.classList.add('start');
 
             instructionText.disabled = false;
             intervalSelect.disabled = false;
+            apiProvider.disabled = false;
+            baseURL.disabled = false;
+            ollamaModel.disabled = false;
+            openaiModel.disabled = false;
+            ttsEnabled.disabled = false;
+            releaseCamera.disabled = false;
+            
             if (responseText.value.startsWith("Processing started...")) {
                 responseText.value = "Processing stopped.";
             }
@@ -258,6 +562,8 @@
             if (intervalId) {
                 clearInterval(intervalId);
             }
+            // Stop any ongoing speech
+            stopSpeech();
         });
 
     </script>
